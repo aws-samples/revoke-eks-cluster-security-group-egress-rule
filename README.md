@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This CloudFormation script creates resources to automate [the security recommendation to revoke the egress rule for Amazon EKS Cluster Security Group](https://docs.paloaltonetworks.com/prisma/prisma-cloud/prisma-cloud-policy-reference/configuration-policies/configuration-policies-build-phase/amazon-web-services-configuration-policies/policy_2378dbf4-b104-4bda-9b05-7417affbba3f.html).
+This CloudFormation script creates resources to automate [the security recommendation to revoke the egress rule for Amazon EKS Cluster Security Group](https://github.com/aws/containers-roadmap/issues/1355).
 
 A Lambda function is invoked based on the following Log Group subscription filter. The Lambda function revokes the default egress rule during the cluster creation phase and prior to the endpoint becoming available.
 
