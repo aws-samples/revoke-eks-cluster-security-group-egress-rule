@@ -1,0 +1,128 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+
+Description: "Revokes open egress rules for new EKS cluster security groups upon EKS cluster creation."
+
+Parameters:
+  CloudWatchLogGroupName:
+    Description: Trail CloudWatch Log Group Name (not ARN)
+    Type: String
+    AllowedPattern: "[a-zA-Z0-9_/.-]*"
+  LambdaName:
+    Type: String
+    Description: Name for a new Lambda Function
+    Default: "AmazonEKS-ClusterSG-Modifier"
+    AllowedPattern: "[a-zA-Z][a-zA-Z0-9-_]*"
+  LambdaExecutionRoleName:
+    Type: String
+    Description: Name for a new Lambda Function execution role
+    Default: "AmazonEKS-ClusterSG-Modifier-Role"
+    AllowedPattern: "[a-zA-Z][a-zA-Z0-9-_]*"
+
+Resources:
+  LambdaRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Description: "Lambda Execution Role"
+      Policies:
+        - PolicyName: !Sub "AWSLambdaBasicExecutionRole-${LambdaName}"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${LambdaName}:*"
+        - PolicyName: "AmazonEKSLambdaModifySecurityGroupEgress-Policy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:RevokeSecurityGroupEgress
+                Resource: "*"
+                Condition:
+                  StringLike:
+                    ec2:ResourceTag/Name:
+                      - eks-cluster-sg-*
+      RoleName: !Ref LambdaExecutionRoleName
+  Lambda:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Code:
+        ZipFile: |
+          import json
+          import gzip
+          import base64
+          import boto3
+          from botocore.exceptions import ClientError
+
+
+          def lambda_handler(event, context):
+              print(json.dumps(event))
+
+              # CloudWatch Log event comes in as Base64 encoded GZIP
+              decoded_data = base64.b64decode(event['awslogs']['data'])
+              data = gzip.decompress(decoded_data)
+              data_json = json.loads(data.decode())
+
+              # Retrieving Security Group id from CloudTrail event stored as JSON string
+              event_json = json.loads(data_json['logEvents'][0]['message'])
+              sg_id = event_json['responseElements']['groupId']
+
+              # Revoking egress, and adding minimum required egress rules
+              ec2 = boto3.resource('ec2')
+              sg = ec2.SecurityGroup(sg_id)
+              try:
+                  response = sg.revoke_egress(
+                      DryRun=False,
+                      IpPermissions=[
+                          {
+                              'IpProtocol': '-1',
+                              'IpRanges': [{'CidrIp': '0.0.0.0/0'}]
+                          }
+                      ]
+                  )
+                  print("Revoking default egress rule:\n\n"+str(response))
+              except ClientError as error:
+                  print(error)
+
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps(event)
+              }
+      Description: "Lambda Function that will be triggered when CloudWatch Log even appears with specifc filter"
+      FunctionName: !Ref LambdaName
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaRole.Arn
+      Runtime: python3.8
+      Timeout: 30
+  LambdaCloudwatchInvokePermission:
+    Type: AWS::Lambda::Permission
+    DependsOn: Lambda
+    Properties:
+      FunctionName: !GetAtt Lambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: !Sub "logs.${AWS::Region}.amazonaws.com"
+      SourceAccount: !Ref AWS::AccountId
+      SourceArn: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:${CloudWatchLogGroupName}:*"
+  LambdaLogFilterTrigger:
+    Type: "AWS::Logs::SubscriptionFilter"
+    Properties:
+      DestinationArn: !GetAtt Lambda.Arn
+      FilterPattern: '{ ($.eventName = "CreateSecurityGroup") && ($.sourceIPAddress = "eks.amazonaws.com") }'
+      LogGroupName: !Ref CloudWatchLogGroupName
